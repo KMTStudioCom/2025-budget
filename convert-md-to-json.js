@@ -155,7 +155,7 @@ ${text}
 async function convertProposalToObject(text) {
   try {
     const { object: generatedObject } = await generateObject({
-      model: openai("gpt-4o"),
+      model: openai("o3-mini"),
       output: "array",
       schema: proposalSchema,
       maxRetries: 5,
@@ -177,11 +177,6 @@ async function convertProposalToObject(text) {
  */
 function saveFile(filePath, content) {
   const dir = path.dirname(filePath);
-
-  // 如果目錄存在，先移除所有內容
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
 
   // 重新建立目錄並儲存檔案
   fs.mkdirSync(dir, { recursive: true });
