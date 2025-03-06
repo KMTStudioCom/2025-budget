@@ -12,7 +12,10 @@
   "license": "ISC",
   "packageManager": "pnpm@10.5.2",
   "dependencies": {
+    "@agentic/ai-sdk": "^7.3.3",
+    "@agentic/calculator": "^7.3.3",
     "@ai-sdk/openai": "^1.2.0",
+    "@supabase/supabase-js": "^2.49.1",
     "ai": "^4.1.50",
     "dotenv": "^16.4.7",
     "tiny-async-pool": "^2.1.0",
