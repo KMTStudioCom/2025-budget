@@ -82,7 +82,7 @@ const categories = [
  */
 function parseProposals(text) {
   return text
-    .split(/\n(?=\([一二三四五六七八九十百○]+\)|第[0-9]+項|第[0-9]+款)/)
+    .split(/\n(?=\([一二三四五六七八九十百○]+\)|第[0-9]+項|第[0-9]+款|(\d+)\.)/)
     .filter((x) => x.trim().length > 0)
     .filter((x) => x.match(/^(?=\([一二三四五六七八九十百]+\))/))
     .map((x) =>
@@ -91,7 +91,6 @@ function parseProposals(text) {
         .replaceAll("\n", "　")
         .replaceAll("提案人：", "\n\n提案人：")
         .replaceAll("連署人：", "\n\n連署人：")
-        .replace(/(\d+)\./g, "\n\n$1.")
     );
 }
 
@@ -155,7 +154,7 @@ ${text}
 async function convertProposalToObject(text) {
   try {
     const { object: generatedObject } = await generateObject({
-      model: openai("o3-mini"),
+      model: text.length > 1500 ? openai("gpt-4o-mini") : openai("gpt-4o"),
       output: "array",
       schema: proposalSchema,
       maxRetries: 5,
