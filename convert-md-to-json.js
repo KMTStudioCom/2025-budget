@@ -9,7 +9,7 @@ import { calculator } from "@agentic/calculator";
 import { createAISDKTools } from "@agentic/ai-sdk";
 
 // 常數定義
-const CONCURRENCY = 30;
+const CONCURRENCY = 5;
 const SAVE_INTERVAL = 20;
 const EXCLUDED_FILES = [];
 
@@ -257,27 +257,59 @@ async function processFile(committee, file) {
 /**
  * 主程式
  */
-async function main() {
-  const markdownDirs = fs
-    .readdirSync("./markdown")
-    .filter((x) => fs.statSync(path.join("./markdown", x)).isDirectory());
 
-  const files = {};
-  for (const dir of markdownDirs) {
-    const dirPath = path.join("./markdown", dir);
-    const dirFiles = fs
-      .readdirSync(dirPath)
-      .filter((x) => x.endsWith(".md"))
-      .filter((x) => fs.statSync(path.join(dirPath, x)).isFile());
-    files[dir] = dirFiles;
-  }
+const markdownDirs = fs
+  .readdirSync("./markdown")
+  .filter((x) => fs.statSync(path.join("./markdown", x)).isDirectory());
 
-  for (const [committee, dirFiles] of Object.entries(files)) {
-    for (const file of dirFiles) {
-      await processFile(committee, file);
-    }
+const files = {};
+for (const dir of markdownDirs) {
+  const dirPath = path.join("./markdown", dir);
+  const dirFiles = fs
+    .readdirSync(dirPath)
+    .filter((x) => x.endsWith(".md"))
+    .filter((x) => fs.statSync(path.join(dirPath, x)).isFile());
+  files[dir] = dirFiles;
+}
+
+// 將所有文件任務展平為一個陣列
+const allTasks = [];
+for (const [committee, dirFiles] of Object.entries(files)) {
+  for (const file of dirFiles) {
+    allTasks.push({ committee, file });
   }
 }
 
-// 執行程式
-main().catch(console.error);
+// 使用立即執行的異步函數來支援頂層 await
+(async () => {
+  try {
+    let completedFiles = 0;
+    const totalFiles = allTasks.length;
+
+    // 使用 for await...of 並行處理所有文件
+    for await (const task of asyncPool(5, allTasks, async (task) => {
+      const { committee, file } = task;
+      const startTime = Date.now();
+      console.log(
+        `[${++completedFiles}/${totalFiles}] 開始處理 ${committee}/${file}`
+      );
+
+      await processFile(committee, file);
+
+      const duration = (Date.now() - startTime) / 1000;
+      console.log(
+        `[${completedFiles}/${totalFiles}] 完成處理 ${committee}/${file} (耗時 ${duration.toFixed(
+          1
+        )}秒)`
+      );
+
+      return task;
+    })) {
+      // 這裡可以加入額外的處理邏輯
+    }
+
+    console.log("所有文件處理完成！");
+  } catch (error) {
+    console.error("處理過程中發生錯誤：", error);
+  }
+})();
