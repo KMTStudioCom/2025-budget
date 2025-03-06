@@ -153,7 +153,7 @@ ${text}
 async function convertProposalToObject(text) {
   try {
     const { object: generatedObject } = await generateObject({
-      model: text.length > 1500 ? openai("gpt-4o-mini") : openai("gpt-4o"),
+      model: openai("gpt-4o"),
       output: "array",
       schema: proposalSchema,
       maxRetries: 5,
