@@ -14,6 +14,10 @@ export const supabase = createClient(supabaseUrl, supabaseKey);
 // 設定並行處理的數量
 const CONCURRENCY = 5;
 
+// 全域進度追蹤
+let globalProcessedCount = 0;
+let globalTotalItems = 0;
+
 /**
  * 生成文本的向量嵌入
  * @param {string} text - 要向量化的文本
@@ -65,7 +69,13 @@ async function processCommitteeFile(committee, file) {
   const filePath = path.join(process.cwd(), "result", committee, file);
   const jsonContent = JSON.parse(fs.readFileSync(filePath, "utf8"));
 
-  // 使用 asyncPool 並行處理向量轉換
+  // 加入全域總數
+  globalTotalItems += jsonContent.length;
+
+  console.log(
+    `\n開始處理 ${committee}/${file} 中的 ${jsonContent.length} 筆資料`
+  );
+
   const itemsWithCommittee = [];
   for await (const processedItem of asyncPool(
     CONCURRENCY,
@@ -79,23 +89,76 @@ async function processCommitteeFile(committee, file) {
         co_signers: Array.isArray(item.co_signers)
           ? item.co_signers.map((x) => x.replaceAll("　", "")).join("、")
           : item.co_signers,
+        cost: item.cost ? Math.round(item.cost) : null,
+        frozen: item.frozen ? Math.round(item.frozen) : null,
+        deleted: item.deleted ? Math.round(item.deleted) : null,
+        added: item.added ? Math.round(item.added) : null,
       };
-      return await generateProposalEmbedding(processed);
+      const result = await generateProposalEmbedding(processed);
+      globalProcessedCount++;
+      process.stdout.write("\r\x1b[K"); // 清除當前行
+      process.stdout.write(
+        `總進度：${globalProcessedCount}/${globalTotalItems} (${Math.round(
+          (globalProcessedCount / globalTotalItems) * 100
+        )}%)`
+      );
+      return result;
     }
   )) {
     itemsWithCommittee.push(processedItem);
   }
+  console.log("\n向量嵌入生成完成！");
 
-  // 上傳到 Supabase
-  const { data, error } = await supabase
-    .from("budget_2025_kmt")
-    .insert(itemsWithCommittee);
+  // 分批上傳到 Supabase
+  const BATCH_SIZE = 100; // 每批上傳的數量
+  const MAX_RETRIES = 3; // 最大重試次數
+  const chunks = [];
 
-  if (error) {
-    console.error(`Error uploading data from ${file}:`, error);
-  } else {
-    console.log(`Successfully uploaded data from ${file}`);
+  // 將資料分批
+  for (let i = 0; i < itemsWithCommittee.length; i += BATCH_SIZE) {
+    chunks.push(itemsWithCommittee.slice(i, i + BATCH_SIZE));
   }
+
+  console.log(`開始上傳，共 ${chunks.length} 批資料`);
+
+  // 處理每一批資料
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    let retryCount = 0;
+    let success = false;
+
+    while (!success && retryCount < MAX_RETRIES) {
+      try {
+        const { error } = await supabase.from("budget_2025_kmt").insert(chunk);
+
+        if (error) {
+          throw error;
+        }
+
+        success = true;
+        console.log(`成功上傳第 ${i + 1}/${chunks.length} 批資料`);
+      } catch (error) {
+        retryCount++;
+        if (retryCount < MAX_RETRIES) {
+          console.error(
+            `上傳第 ${i + 1} 批時發生錯誤，${
+              MAX_RETRIES - retryCount
+            } 次重試機會：`,
+            error
+          );
+          // 等待一下再重試
+          await new Promise((resolve) =>
+            setTimeout(resolve, 1000 * retryCount)
+          );
+        } else {
+          console.error(`上傳第 ${i + 1} 批失敗，已達最大重試次數：`, error);
+          throw error; // 重試次數用完，拋出錯誤
+        }
+      }
+    }
+  }
+
+  console.log(`${file} 的所有資料上傳完成！`);
 }
 
 try {
