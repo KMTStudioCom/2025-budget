@@ -15,6 +15,10 @@ const SAVE_INTERVAL = 20;
 const EXCLUDED_FILES = [];
 const PROCESS_STATUS_FILE = "processed-files.json";
 
+// 錯誤處理相關常數
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000; // 1 秒
+
 // 提案 Schema 定義
 const proposalSchema = z.object({
   category: z.string().describe("分類"),
@@ -28,7 +32,7 @@ const proposalSchema = z.object({
     "減列與凍結",
     "減列與增列",
   ]),
-  proposer: z.array(z.string()).describe("提案人"),
+  proposer: z.array(z.string()).describe("提案人").nullable(),
   co_signers: z.array(z.string()).describe("連署人").nullable(),
   cost: z.number().describe("預算金額").nullable(),
   frozen: z.number().describe("凍結金額").nullable(),
@@ -102,28 +106,47 @@ function parseProposals(text) {
 /**
  * 生成提案提示詞
  * @param {string} text - 提案文本
+ * @param {Error} [error] - 前次錯誤（如果有的話）
  * @returns {string} 完整的提示詞
  */
-function generatePrompt(text) {
+function generatePrompt(text, error = null) {
+  const errorContext = error
+    ? `
+前次處理發生錯誤：
+錯誤類型：${error.name}
+錯誤訊息：${error.message}
+錯誤堆疊：${error.stack}
+
+請特別注意以下幾點：
+1. 檢查金額計算是否正確
+2. 確認分類是否在允許的範圍內
+3. 驗證提案內容格式是否正確
+4. 確保所有必要欄位都已填寫
+`
+    : "";
+
   return `請根據以下分類，將提案轉換為 JSON 格式：
 
 分類：
 ${categories.join("、")}
 
-請根據提案內容解析：
+${errorContext}請根據提案內容解析：
 - **分類 (category)**：判斷該提案應屬於哪個分類，例如內政部或黨產會
 - **提案內容 (content)**：
-  - 你可以讓排版更加流暢
+  - 移除提案編號並保留原始文字，不要更動
   - 可以使用換行符號換行
-  - 無需保留提案編號
 - **行動 (action)**：
-  - 若提案要求照列預算，選擇 "照列"
-  - 若提案要求刪減預算，選擇 "減列"
-  - 若提案要求凍結預算，選擇 "凍結"
-  - 若提案要求增列預算，選擇 "增列"
-  - 若提案為流程改善、政策建議等，選擇 "其他建議"
+  - 若提案要求照列預算，選擇 「照列」
+  - 若提案要求刪減預算，選擇 「減列」
+  - 若提案要求凍結預算，選擇 「凍結」
+  - 若提案要求增列預算，選擇 「增列」
+  - 若提案為流程改善、政策建議或是未提及明確金額等，選擇「其他建議」
 - **提案人 (proposer)**：提案人姓名
+  - 提案人若名字為二字，會以全形空白隔開，例如「游　顥」
+  - 若提案人未提及，填寫 null
 - **連署人 (co_signers)**：連署人姓名
+  - 提案人若名字為二字，會以全形空白隔開，例如「游　顥」
+  - 若連署人未提及，填寫 null
 - **預算金額 (cost)**：原始編列的預算金額，若提案未提及，填寫 null
 - **凍結金額 (frozen)**：若無凍結要求，填寫 null
 - **減列金額 (deleted)**：若無刪減要求，填寫 null
@@ -150,26 +173,71 @@ ${text}
 }
 
 /**
+ * 延遲函數
+ * @param {number} ms - 延遲毫秒數
+ * @returns {Promise<void>}
+ */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * 將提案轉換為結構化物件
  * @param {string} text - 提案文本
  * @returns {Promise<Array>} 轉換後的提案物件陣列
  */
 export async function convertProposalToObject(text) {
-  try {
-    const { object: generatedObject } = await generateObject({
-      model: openai("o3-mini"),
-      output: "array",
-      schema: proposalSchema,
-      maxRetries: 5,
-      prompt: generatePrompt(text),
-      tools: createAISDKTools(calculator),
-      toolChoice: "required",
-    });
-    return generatedObject;
-  } catch (error) {
-    console.error("Generation failed:", error);
-    return [];
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const { object: generatedObject } = await generateObject({
+        model: openai("o3-mini"),
+        output: "array",
+        schema: proposalSchema,
+        maxRetries: 3,
+        prompt: generatePrompt(text, lastError),
+        tools: createAISDKTools(calculator),
+        toolChoice: "required",
+      });
+
+      if (!generatedObject || generatedObject.length === 0) {
+        throw new Error("AI 返回空結果");
+      }
+
+      // 驗證結果
+      for (const item of generatedObject) {
+        if (!item.category || !categories.includes(item.category)) {
+          throw new Error(`無效的分類：${item.category}`);
+        }
+        if (!item.content || item.content.trim().length === 0) {
+          throw new Error("提案內容為空");
+        }
+      }
+
+      return generatedObject;
+    } catch (error) {
+      lastError = error;
+      console.error(`[提案轉換] 第 ${attempt} 次嘗試失敗：`, {
+        error: error.message,
+        stack: error.stack,
+        text: text.substring(0, 100) + "...", // 只記錄前 100 個字
+      });
+
+      if (attempt < MAX_RETRIES) {
+        console.log(`[提案轉換] 等待 ${RETRY_DELAY}ms 後重試...`);
+        await delay(RETRY_DELAY);
+      }
+    }
   }
+
+  console.error(`[提案轉換] 所有嘗試都失敗了，最後的錯誤：`, {
+    error: lastError.message,
+    stack: lastError.stack,
+    text: text.substring(0, 100) + "...",
+  });
+
+  return [];
 }
 
 /**
@@ -343,24 +411,28 @@ if (process.argv[1].endsWith("convert-md-to-json.js")) {
       const totalFiles = allTasks.length;
 
       // 使用 for await...of 並行處理所有文件
-      for await (const task of asyncPool(5, allTasks, async (task) => {
-        const { committee, file } = task;
-        const startTime = Date.now();
-        console.log(
-          `[${++completedFiles}/${totalFiles}] 開始處理 ${committee}/${file}`
-        );
+      for await (const task of asyncPool(
+        CONCURRENCY,
+        allTasks,
+        async (task) => {
+          const { committee, file } = task;
+          const startTime = Date.now();
+          console.log(
+            `[${++completedFiles}/${totalFiles}] 開始處理 ${committee}/${file}`
+          );
 
-        await processFile(committee, file);
+          await processFile(committee, file);
 
-        const duration = (Date.now() - startTime) / 1000;
-        console.log(
-          `[${completedFiles}/${totalFiles}] 完成處理 ${committee}/${file} (耗時 ${duration.toFixed(
-            1
-          )}秒)`
-        );
+          const duration = (Date.now() - startTime) / 1000;
+          console.log(
+            `[${completedFiles}/${totalFiles}] 完成處理 ${committee}/${file} (耗時 ${duration.toFixed(
+              1
+            )}秒)`
+          );
 
-        return task;
-      })) {
+          return task;
+        }
+      )) {
         // 這裡可以加入額外的處理邏輯
       }
 
