@@ -19,7 +19,15 @@ const PROCESS_STATUS_FILE = "processed-files.json";
 const proposalSchema = z.object({
   category: z.string().describe("分類"),
   content: z.string().describe("提案內容"),
-  action: z.enum(["減列", "凍結", "減列與凍結", "其他建議", "照列", "增列"]),
+  action: z.enum([
+    "減列",
+    "凍結",
+    "其他建議",
+    "照列",
+    "增列",
+    "減列與凍結",
+    "減列與增列",
+  ]),
   proposer: z.array(z.string()).describe("提案人"),
   co_signers: z.array(z.string()).describe("連署人").nullable(),
   cost: z.number().describe("預算金額").nullable(),
@@ -80,7 +88,7 @@ const categories = [
 function parseProposals(text) {
   return text
     .split(/\n(?=\([一二三四五六七八九十百○]+\)|第[0-9]+項|第[0-9]+款|(\d+)\.)/)
-    .filter((x) => x.trim().length > 0)
+    .filter((x) => x && x.trim().length > 0)
     .filter((x) => x.match(/^(?=\([一二三四五六七八九十百]+\))/))
     .map((x) =>
       x
@@ -264,13 +272,8 @@ async function processFile(committee, file) {
   const parsedProposals = parseProposals(text);
   let completedProposals = 0;
 
-  for await (const objects of asyncPool(
-    CONCURRENCY,
-    parsedProposals,
-    async (item) => {
-      return await convertProposalToObject(item);
-    }
-  )) {
+  for (const item of parsedProposals) {
+    const objects = await convertProposalToObject(item);
     completedProposals++;
     console.log(`[${file}] ${completedProposals}/${parsedProposals.length}`);
 
@@ -310,8 +313,7 @@ async function processFile(committee, file) {
 /**
  * 主程式
  */
-// check args is convert-md-to-json.js
-if (process.argv[1] === "convert-md-to-json.js") {
+if (process.argv[1].endsWith("convert-md-to-json.js")) {
   const markdownDirs = fs
     .readdirSync("./markdown")
     .filter((x) => fs.statSync(path.join("./markdown", x)).isDirectory());
