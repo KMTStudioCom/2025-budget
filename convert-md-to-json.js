@@ -7,11 +7,13 @@ import fs from "fs";
 import path from "path";
 import { calculator } from "@agentic/calculator";
 import { createAISDKTools } from "@agentic/ai-sdk";
+import process from "process";
 
 // 常數定義
 const CONCURRENCY = 5;
 const SAVE_INTERVAL = 20;
 const EXCLUDED_FILES = [];
+const PROCESS_STATUS_FILE = "processed-files.json";
 
 // 提案 Schema 定義
 const proposalSchema = z.object({
@@ -19,12 +21,7 @@ const proposalSchema = z.object({
   content: z.string().describe("提案內容"),
   action: z.enum(["減列", "凍結", "減列與凍結", "其他建議", "照列", "增列"]),
   proposer: z.array(z.string()).describe("提案人"),
-  co_signers: z
-    .array(z.string())
-    .describe("連署人")
-    .optional()
-    .nullable()
-    .default([]),
+  co_signers: z.array(z.string()).describe("連署人").nullable(),
   cost: z.number().describe("預算金額").nullable(),
   frozen: z.number().describe("凍結金額").nullable(),
   deleted: z.number().describe("減列金額").nullable(),
@@ -108,10 +105,9 @@ ${categories.join("、")}
 請根據提案內容解析：
 - **分類 (category)**：判斷該提案應屬於哪個分類，例如內政部或黨產會
 - **提案內容 (content)**：
-- 完整保留提案敘述
-  - 你可以讓排版更加流暢，但請不要更改任何文字
-  - 必填
-  - 可以使用換行符號換行(\\n)
+  - 你可以讓排版更加流暢
+  - 可以使用換行符號換行
+  - 無需保留提案編號
 - **行動 (action)**：
   - 若提案要求照列預算，選擇 "照列"
   - 若提案要求刪減預算，選擇 "減列"
@@ -132,7 +128,7 @@ ${categories.join("、")}
 * 無需保留提案編號
 
 * 所有金額計算必須使用 calculator 工具
-* 例如：要計算 1000萬 轉換為元，計算 1000 * 10000
+* 例如：要計算「1000萬」轉換為元，計算 1000 * 10000
 * 要計算凍結十分之一，計算 x * 0.1
 * 單位大部分是「萬元」，不是「千元」
   - 萬元後面是 4 個 0
@@ -150,10 +146,10 @@ ${text}
  * @param {string} text - 提案文本
  * @returns {Promise<Array>} 轉換後的提案物件陣列
  */
-async function convertProposalToObject(text) {
+export async function convertProposalToObject(text) {
   try {
     const { object: generatedObject } = await generateObject({
-      model: openai("gpt-4o"),
+      model: openai("o3-mini"),
       output: "array",
       schema: proposalSchema,
       maxRetries: 5,
@@ -191,12 +187,74 @@ function saveFile(filePath, content) {
 }
 
 /**
+ * 讀取處理狀態
+ * @returns {Object} 處理狀態物件
+ */
+function loadProcessStatus() {
+  const defaultStatus = {
+    lastUpdated: new Date().toISOString(),
+    processedFiles: [],
+  };
+
+  try {
+    if (fs.existsSync(PROCESS_STATUS_FILE)) {
+      return JSON.parse(fs.readFileSync(PROCESS_STATUS_FILE, "utf8"));
+    } else {
+      fs.writeFileSync(
+        PROCESS_STATUS_FILE,
+        JSON.stringify(defaultStatus, null, 2)
+      );
+      return defaultStatus;
+    }
+  } catch (error) {
+    console.error("讀取處理狀態時發生錯誤：", error);
+    return defaultStatus;
+  }
+}
+
+/**
+ * 更新處理狀態
+ * @param {string} committee - 委員會名稱
+ * @param {string} file - 檔案名稱
+ */
+function updateProcessStatus(committee, file) {
+  try {
+    const status = loadProcessStatus();
+    const fileKey = `${committee}/${file}`;
+
+    if (!status.processedFiles.includes(fileKey)) {
+      status.processedFiles.push(fileKey);
+    }
+    status.lastUpdated = new Date().toISOString();
+
+    fs.writeFileSync(PROCESS_STATUS_FILE, JSON.stringify(status, null, 2));
+  } catch (error) {
+    console.error("更新處理狀態時發生錯誤：", error);
+  }
+}
+
+/**
+ * 檢查檔案是否已處理
+ * @param {string} committee - 委員會名稱
+ * @param {string} file - 檔案名稱
+ * @returns {boolean} 是否已處理
+ */
+function isFileProcessed(committee, file) {
+  const status = loadProcessStatus();
+  return status.processedFiles.includes(`${committee}/${file}`);
+}
+
+/**
  * 處理單一檔案
  * @param {string} committee - 委員會名稱
  * @param {string} file - 檔案名稱
  */
 async function processFile(committee, file) {
   if (EXCLUDED_FILES.includes(file)) return;
+  if (isFileProcessed(committee, file)) {
+    console.log(`[${committee}/${file}] 已處理過，跳過`);
+    return;
+  }
 
   const proposals = [];
   const text = fs.readFileSync(
@@ -245,64 +303,68 @@ async function processFile(committee, file) {
     ),
     proposals
   );
+
+  updateProcessStatus(committee, file);
 }
 
 /**
  * 主程式
  */
+// check args is convert-md-to-json.js
+if (process.argv[1] === "convert-md-to-json.js") {
+  const markdownDirs = fs
+    .readdirSync("./markdown")
+    .filter((x) => fs.statSync(path.join("./markdown", x)).isDirectory());
 
-const markdownDirs = fs
-  .readdirSync("./markdown")
-  .filter((x) => fs.statSync(path.join("./markdown", x)).isDirectory());
-
-const files = {};
-for (const dir of markdownDirs) {
-  const dirPath = path.join("./markdown", dir);
-  const dirFiles = fs
-    .readdirSync(dirPath)
-    .filter((x) => x.endsWith(".md"))
-    .filter((x) => fs.statSync(path.join(dirPath, x)).isFile());
-  files[dir] = dirFiles;
-}
-
-// 將所有文件任務展平為一個陣列
-const allTasks = [];
-for (const [committee, dirFiles] of Object.entries(files)) {
-  for (const file of dirFiles) {
-    allTasks.push({ committee, file });
+  const files = {};
+  for (const dir of markdownDirs) {
+    const dirPath = path.join("./markdown", dir);
+    const dirFiles = fs
+      .readdirSync(dirPath)
+      .filter((x) => x.endsWith(".md"))
+      .filter((x) => fs.statSync(path.join(dirPath, x)).isFile());
+    files[dir] = dirFiles;
   }
-}
 
-// 使用立即執行的異步函數來支援頂層 await
-(async () => {
-  try {
-    let completedFiles = 0;
-    const totalFiles = allTasks.length;
-
-    // 使用 for await...of 並行處理所有文件
-    for await (const task of asyncPool(5, allTasks, async (task) => {
-      const { committee, file } = task;
-      const startTime = Date.now();
-      console.log(
-        `[${++completedFiles}/${totalFiles}] 開始處理 ${committee}/${file}`
-      );
-
-      await processFile(committee, file);
-
-      const duration = (Date.now() - startTime) / 1000;
-      console.log(
-        `[${completedFiles}/${totalFiles}] 完成處理 ${committee}/${file} (耗時 ${duration.toFixed(
-          1
-        )}秒)`
-      );
-
-      return task;
-    })) {
-      // 這裡可以加入額外的處理邏輯
+  // 將所有文件任務展平為一個陣列
+  const allTasks = [];
+  for (const [committee, dirFiles] of Object.entries(files)) {
+    for (const file of dirFiles) {
+      allTasks.push({ committee, file });
     }
-
-    console.log("所有文件處理完成！");
-  } catch (error) {
-    console.error("處理過程中發生錯誤：", error);
   }
-})();
+
+  // 使用立即執行的異步函數來支援頂層 await
+  (async () => {
+    try {
+      let completedFiles = 0;
+      const totalFiles = allTasks.length;
+
+      // 使用 for await...of 並行處理所有文件
+      for await (const task of asyncPool(5, allTasks, async (task) => {
+        const { committee, file } = task;
+        const startTime = Date.now();
+        console.log(
+          `[${++completedFiles}/${totalFiles}] 開始處理 ${committee}/${file}`
+        );
+
+        await processFile(committee, file);
+
+        const duration = (Date.now() - startTime) / 1000;
+        console.log(
+          `[${completedFiles}/${totalFiles}] 完成處理 ${committee}/${file} (耗時 ${duration.toFixed(
+            1
+          )}秒)`
+        );
+
+        return task;
+      })) {
+        // 這裡可以加入額外的處理邏輯
+      }
+
+      console.log("所有文件處理完成！");
+    } catch (error) {
+      console.error("處理過程中發生錯誤：", error);
+    }
+  })();
+}
